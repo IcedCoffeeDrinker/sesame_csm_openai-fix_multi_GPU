@@ -119,6 +119,9 @@ def _prepare_transformer(model):
     # Avoid device-mismatch from torchtune's final norm by removing it (we do our own dtype/device management)
     if hasattr(model, 'norm'):
         model.norm = nn.Identity()
+    # Some torchtune variants use an `unembed` module for final norm/projection
+    if hasattr(model, 'unembed'):
+        model.unembed = nn.Identity()
     return model, embed_dim
 
 
