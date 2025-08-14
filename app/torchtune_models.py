@@ -200,7 +200,25 @@ class Model(nn.Module):
         decoder_device = next(self.decoder.parameters()).device
 
         self.backbone.setup_caches(max_batch_size, backbone_dtype)
+        # Ensure backbone kv_caches live on backbone_device
+        try:
+            for layer in getattr(self.backbone, 'layers', []):
+                attn = getattr(layer, 'attn', None)
+                kv = getattr(attn, 'kv_cache', None)
+                if kv is not None and hasattr(kv, 'to'):
+                    kv.to(backbone_device)
+        except Exception:
+            pass
         self.decoder.setup_caches(max_batch_size, decoder_dtype, decoder_max_seq_len=self.args.audio_num_codebooks)
+        # Ensure decoder kv_caches live on decoder_device
+        try:
+            for layer in getattr(self.decoder, 'layers', []):
+                attn = getattr(layer, 'attn', None)
+                kv = getattr(attn, 'kv_cache', None)
+                if kv is not None and hasattr(kv, 'to'):
+                    kv.to(decoder_device)
+        except Exception:
+            pass
 
         # Place masks on the devices where they're used
         self.register_buffer(
@@ -280,10 +298,13 @@ class Model(nn.Module):
         for i in range(1, self.args.audio_num_codebooks):
             curr_decoder_mask = _index_causal_mask(self.decoder_causal_mask, curr_pos)
             # Projection and decoder are expected on decoder device
-            if self.projection.weight.device != curr_h.device:
-                curr_h = curr_h.to(self.projection.weight.device)
-                curr_pos = curr_pos.to(self.projection.weight.device)
-                curr_decoder_mask = curr_decoder_mask.to(self.projection.weight.device)
+            proj_device = self.projection.weight.device
+            if curr_h.device != proj_device:
+                curr_h = curr_h.to(proj_device)
+            if curr_pos.device != proj_device:
+                curr_pos = curr_pos.to(proj_device)
+            if curr_decoder_mask.device != proj_device:
+                curr_decoder_mask = curr_decoder_mask.to(proj_device)
             decoder_h = self.decoder(self.projection(curr_h), input_pos=curr_pos, mask=curr_decoder_mask).to(dtype=dtype)
             ci_logits = torch.mm(decoder_h[:, -1, :], self.audio_head[i - 1])
             ci_sample = sample_topk(ci_logits, topk, temperature)
