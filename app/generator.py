@@ -213,10 +213,11 @@ class Generator:
                 samples_batch.append(sample)
                 if torch.all(sample == 0):
                     break
-                curr_tokens = torch.cat([sample, torch.zeros(1, 1).long().to(self.device)], dim=1).unsqueeze(1)
-                curr_tokens_mask = torch.cat(
-                    [torch.ones_like(sample).bool(), torch.zeros(1, 1).bool().to(self.device)], dim=1
-                ).unsqueeze(1)
+                # Keep concatenations on the same device as the sample to avoid cross-device errors
+                pad_tok = torch.zeros(1, 1, dtype=torch.long, device=sample.device)
+                pad_mask = torch.zeros(1, 1, dtype=torch.bool, device=sample.device)
+                curr_tokens = torch.cat([sample, pad_tok], dim=1).unsqueeze(1)
+                curr_tokens_mask = torch.cat([torch.ones_like(sample, dtype=torch.bool), pad_mask], dim=1).unsqueeze(1)
                 curr_pos = curr_pos[:, -1:] + 1
             all_samples.extend(samples_batch)
             if len(samples_batch) < batch_frames:
@@ -309,10 +310,10 @@ class Generator:
                     if torch.all(sample == 0):
                         break
                     
-                    curr_tokens = torch.cat([sample, torch.zeros(1, 1).long().to(self.device)], dim=1).unsqueeze(1)
-                    curr_tokens_mask = torch.cat(
-                        [torch.ones_like(sample).bool(), torch.zeros(1, 1).bool().to(self.device)], dim=1
-                    ).unsqueeze(1)
+                    pad_tok = torch.zeros(1, 1, dtype=torch.long, device=sample.device)
+                    pad_mask = torch.zeros(1, 1, dtype=torch.bool, device=sample.device)
+                    curr_tokens = torch.cat([sample, pad_tok], dim=1).unsqueeze(1)
+                    curr_tokens_mask = torch.cat([torch.ones_like(sample, dtype=torch.bool), pad_mask], dim=1).unsqueeze(1)
                     curr_pos = curr_pos[:, -1:] + 1
                 
                 first_segment_samples.extend(samples_batch)
@@ -379,10 +380,10 @@ class Generator:
                         if torch.all(sample == 0):
                             break
                         
-                        curr_tokens = torch.cat([sample, torch.zeros(1, 1).long().to(self.device)], dim=1).unsqueeze(1)
-                        curr_tokens_mask = torch.cat(
-                            [torch.ones_like(sample).bool(), torch.zeros(1, 1).bool().to(self.device)], dim=1
-                        ).unsqueeze(1)
+                        pad_tok = torch.zeros(1, 1, dtype=torch.long, device=sample.device)
+                        pad_mask = torch.zeros(1, 1, dtype=torch.bool, device=sample.device)
+                        curr_tokens = torch.cat([sample, pad_tok], dim=1).unsqueeze(1)
+                        curr_tokens_mask = torch.cat([torch.ones_like(sample, dtype=torch.bool), pad_mask], dim=1).unsqueeze(1)
                         curr_pos = curr_pos[:, -1:] + 1
                     
                     segment_samples.extend(samples_batch)
@@ -461,10 +462,10 @@ class Generator:
                     if torch.all(sample == 0):
                         break
                     
-                    curr_tokens = torch.cat([sample, torch.zeros(1, 1).long().to(self.device)], dim=1).unsqueeze(1)
-                    curr_tokens_mask = torch.cat(
-                        [torch.ones_like(sample).bool(), torch.zeros(1, 1).bool().to(self.device)], dim=1
-                    ).unsqueeze(1)
+                    pad_tok = torch.zeros(1, 1, dtype=torch.long, device=sample.device)
+                    pad_mask = torch.zeros(1, 1, dtype=torch.bool, device=sample.device)
+                    curr_tokens = torch.cat([sample, pad_tok], dim=1).unsqueeze(1)
+                    curr_tokens_mask = torch.cat([torch.ones_like(sample, dtype=torch.bool), pad_mask], dim=1).unsqueeze(1)
                     curr_pos = curr_pos[:, -1:] + 1
                 
                 all_samples.extend(samples_batch)
@@ -483,7 +484,10 @@ class Generator:
         if self._watermarker is not None:
             try:
                 audio, wm_sample_rate = watermark(self._watermarker, audio, self.sample_rate, CSM_1B_GH_WATERMARK)
-                audio = torchaudio.functional.resample(audio, orig_freq=wm_sample_rate, new_freq=self.sample_rate)
+                # torchaudio resample generally expects CPU tensors; perform on CPU to avoid device mismatch
+                audio_cpu = audio.detach().cpu()
+                audio_cpu = torchaudio.functional.resample(audio_cpu, orig_freq=wm_sample_rate, new_freq=self.sample_rate)
+                audio = audio_cpu.to(self.device)
             except Exception as e:
                 logger.warning(f"Error applying watermark: {e}. Continuing without watermark.")
         

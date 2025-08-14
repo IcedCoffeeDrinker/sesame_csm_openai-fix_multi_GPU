@@ -235,8 +235,10 @@ class Model(nn.Module):
         
         assert self.backbone.caches_are_enabled(), "backbone caches are not enabled"
         
-        curr_backbone_mask = _index_causal_mask(self.backbone_causal_mask, input_pos)
         embeds = self._embed_tokens(tokens)
+        # Align masks to the backbone/embedding device
+        if tokens_mask.device != embeds.device:
+            tokens_mask = tokens_mask.to(embeds.device)
         masked_embeds = embeds * tokens_mask.unsqueeze(-1)
         h = masked_embeds.sum(dim=2)
         
@@ -244,8 +246,9 @@ class Model(nn.Module):
         backbone_device = next(self.backbone.parameters()).device
         if h.device != backbone_device:
             h = h.to(backbone_device)
+        if input_pos.device != backbone_device:
             input_pos = input_pos.to(backbone_device)
-            curr_backbone_mask = curr_backbone_mask.to(backbone_device)
+        curr_backbone_mask = _index_causal_mask(self.backbone_causal_mask, input_pos)
 
         h = self.backbone(h, input_pos=input_pos, mask=curr_backbone_mask).to(dtype=dtype)
         
