@@ -583,11 +583,17 @@ def _manual_device_map(model, state_dict, strategy="balanced"):
     for layer_idx, dev in bb_map.items():
         if hasattr(model.backbone, 'layers') and layer_idx < len(model.backbone.layers):
             model.backbone.layers[layer_idx] = model.backbone.layers[layer_idx].to(dev)
+    # Ensure backbone final norm is on backbone device
+    if hasattr(model.backbone, 'norm'):
+        model.backbone.norm = model.backbone.norm.to(devices[0])
 
     # Move decoder layers
     for layer_idx, dev in dec_map.items():
         if hasattr(model.decoder, 'layers') and layer_idx < len(model.decoder.layers):
             model.decoder.layers[layer_idx] = model.decoder.layers[layer_idx].to(dev)
+    # Ensure decoder final norm is on decoder device
+    if hasattr(model.decoder, 'norm'):
+        model.decoder.norm = model.decoder.norm.to(last_gpu)
 
     # Embeddings on GPU 0 (backbone side)
     model.text_embeddings = model.text_embeddings.to(devices[0])

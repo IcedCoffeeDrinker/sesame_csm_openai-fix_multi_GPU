@@ -270,7 +270,10 @@ class Model(nn.Module):
             input_pos = input_pos.to(backbone_device)
         curr_backbone_mask = _index_causal_mask(self.backbone_causal_mask, input_pos)
 
-        h = self.backbone(h, input_pos=input_pos, mask=curr_backbone_mask).to(dtype=dtype)
+        h = self.backbone(h, input_pos=input_pos, mask=curr_backbone_mask)
+        # backbone returns on its own device; ensure dtype only, no device copy
+        if h.dtype != dtype:
+            h = h.to(dtype=dtype)
         
         last_h = h[:, -1, :]
         # Compute codebook 0 logits on the device of codebook0_head
