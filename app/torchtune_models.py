@@ -116,6 +116,9 @@ def _prepare_transformer(model):
     embed_dim = model.tok_embeddings.embedding_dim
     model.tok_embeddings = nn.Identity()
     model.output = nn.Identity()
+    # Avoid device-mismatch from torchtune's final norm by removing it (we do our own dtype/device management)
+    if hasattr(model, 'norm'):
+        model.norm = nn.Identity()
     return model, embed_dim
 
 
