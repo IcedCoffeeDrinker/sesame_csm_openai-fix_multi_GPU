@@ -299,7 +299,7 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error initializing prompt templates: {e}\n{error_stack}")
             logger.warning("Voice consistency features will be limited")
         
-        # Generate voice reference samples (runs in background to avoid blocking startup)
+        # Optionally generate voice reference samples on startup
         async def generate_samples_async():
             try:
                 logger.info("Starting voice reference generation (background task)...")
@@ -309,9 +309,11 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 error_stack = traceback.format_exc()
                 logger.error(f"Error in voice reference generation: {str(e)}\n{error_stack}")
-        
-        # Start as a background task
-        asyncio.create_task(generate_samples_async())
+
+        if os.environ.get("GENERATE_VOICE_REFERENCES_ON_STARTUP", "false").lower() == "true":
+            asyncio.create_task(generate_samples_async())
+        else:
+            logger.info("Skipping voice reference generation on startup (set GENERATE_VOICE_REFERENCES_ON_STARTUP=true to enable)")
         
         # Initialize voice cache for all voices (standard + cloned)
         app.state.voice_cache = {}

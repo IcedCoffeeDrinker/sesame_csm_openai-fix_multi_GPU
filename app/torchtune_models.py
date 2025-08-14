@@ -235,6 +235,8 @@ class Model(nn.Module):
         
         assert self.backbone.caches_are_enabled(), "backbone caches are not enabled"
         
+        # Remove verbose device debug logging for production
+
         embeds = self._embed_tokens(tokens)
         # Align masks to the backbone/embedding device
         if tokens_mask.device != embeds.device:
