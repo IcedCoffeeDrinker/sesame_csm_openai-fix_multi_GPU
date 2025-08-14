@@ -226,8 +226,10 @@ class Generator:
         if not all_samples:
             return torch.zeros(10, device=self.device)  # Return short empty audio
             
-        # Decode audio
-        audio = self._audio_tokenizer.decode(torch.stack(all_samples).permute(1, 2, 0)).squeeze(0).squeeze(0)
+        # Decode audio on the same device as the audio tokenizer (MiMi)
+        mimi_device = next(self._audio_tokenizer.parameters()).device if hasattr(self._audio_tokenizer, 'parameters') else self.device
+        token_stack = torch.stack(all_samples).permute(1, 2, 0).to(mimi_device)
+        audio = self._audio_tokenizer.decode(token_stack).squeeze(0).squeeze(0)
         return audio
 
     @torch.inference_mode()
@@ -324,10 +326,10 @@ class Generator:
             if not first_segment_samples:
                 raise RuntimeError("No audio generated for first segment")
             
-            # Decode first segment
-            first_segment_audio = self._audio_tokenizer.decode(
-                torch.stack(first_segment_samples).permute(1, 2, 0)
-            ).squeeze(0).squeeze(0)
+            # Decode first segment on MiMi device
+            mimi_device = next(self._audio_tokenizer.parameters()).device if hasattr(self._audio_tokenizer, 'parameters') else self.device
+            token_stack = torch.stack(first_segment_samples).permute(1, 2, 0).to(mimi_device)
+            first_segment_audio = self._audio_tokenizer.decode(token_stack).squeeze(0).squeeze(0)
             
             all_audio_segments.append(first_segment_audio)
             
@@ -395,10 +397,10 @@ class Generator:
                     logger.warning(f"No audio generated for segment {i+1}")
                     continue
                 
-                # Decode segment
-                segment_audio = self._audio_tokenizer.decode(
-                    torch.stack(segment_samples).permute(1, 2, 0)
-                ).squeeze(0).squeeze(0)
+                # Decode segment on MiMi device
+                mimi_device = next(self._audio_tokenizer.parameters()).device if hasattr(self._audio_tokenizer, 'parameters') else self.device
+                token_stack = torch.stack(segment_samples).permute(1, 2, 0).to(mimi_device)
+                segment_audio = self._audio_tokenizer.decode(token_stack).squeeze(0).squeeze(0)
                 
                 all_audio_segments.append(segment_audio)
             
@@ -477,8 +479,10 @@ class Generator:
             if not all_samples:
                 raise RuntimeError("No audio generated - model produced empty output")
             
-            # Decode audio
-            audio = self._audio_tokenizer.decode(torch.stack(all_samples).permute(1, 2, 0)).squeeze(0).squeeze(0)
+            # Decode audio on MiMi device
+            mimi_device = next(self._audio_tokenizer.parameters()).device if hasattr(self._audio_tokenizer, 'parameters') else self.device
+            token_stack = torch.stack(all_samples).permute(1, 2, 0).to(mimi_device)
+            audio = self._audio_tokenizer.decode(token_stack).squeeze(0).squeeze(0)
         
         # Apply watermark
         if self._watermarker is not None:
