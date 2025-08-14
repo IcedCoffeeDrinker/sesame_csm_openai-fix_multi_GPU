@@ -193,15 +193,24 @@ class Model(nn.Module):
     
     def setup_caches(self, max_batch_size: int) -> torch.Tensor:
         """Setup KV caches and return a causal mask."""
-        dtype = next(self.parameters()).dtype
-        device = next(self.parameters()).device
-        
-        with device:
-            self.backbone.setup_caches(max_batch_size, dtype)
-            self.decoder.setup_caches(max_batch_size, dtype, decoder_max_seq_len=self.args.audio_num_codebooks)
-        
-        self.register_buffer("backbone_causal_mask", _create_causal_mask(self.backbone.max_seq_len, device))
-        self.register_buffer("decoder_causal_mask", _create_causal_mask(self.args.audio_num_codebooks, device))
+        # Use each submodule's own device for caches and masks to support model-parallel
+        backbone_dtype = next(self.backbone.parameters()).dtype
+        backbone_device = next(self.backbone.parameters()).device
+        decoder_dtype = next(self.decoder.parameters()).dtype
+        decoder_device = next(self.decoder.parameters()).device
+
+        self.backbone.setup_caches(max_batch_size, backbone_dtype)
+        self.decoder.setup_caches(max_batch_size, decoder_dtype, decoder_max_seq_len=self.args.audio_num_codebooks)
+
+        # Place masks on the devices where they're used
+        self.register_buffer(
+            "backbone_causal_mask",
+            _create_causal_mask(self.backbone.max_seq_len, backbone_device),
+        )
+        self.register_buffer(
+            "decoder_causal_mask",
+            _create_causal_mask(self.args.audio_num_codebooks, decoder_device),
+        )
     
     def generate_frame(
         self,
@@ -231,27 +240,49 @@ class Model(nn.Module):
         masked_embeds = embeds * tokens_mask.unsqueeze(-1)
         h = masked_embeds.sum(dim=2)
         
+        # Ensure backbone input is on backbone device
+        backbone_device = next(self.backbone.parameters()).device
+        if h.device != backbone_device:
+            h = h.to(backbone_device)
+            input_pos = input_pos.to(backbone_device)
+            curr_backbone_mask = curr_backbone_mask.to(backbone_device)
+
         h = self.backbone(h, input_pos=input_pos, mask=curr_backbone_mask).to(dtype=dtype)
         
         last_h = h[:, -1, :]
-        c0_logits = self.codebook0_head(last_h)
+        # Compute codebook 0 logits on the device of codebook0_head
+        c0_device = self.codebook0_head.weight.device
+        if last_h.device != c0_device:
+            last_h_for_c0 = last_h.to(c0_device)
+        else:
+            last_h_for_c0 = last_h
+        c0_logits = self.codebook0_head(last_h_for_c0)
         c0_sample = sample_topk(c0_logits, topk, temperature)
+        # Embed codebook 0 tokens (handle cross-device for embeddings)
         c0_embed = self._embed_audio(0, c0_sample)
         
         curr_h = torch.cat([last_h.unsqueeze(1), c0_embed], dim=1)
         curr_sample = c0_sample.clone()
-        curr_pos = torch.arange(0, curr_h.size(1), device=curr_h.device).unsqueeze(0).repeat(curr_h.size(0), 1)
+        # Move to decoder device before projection/decoder
+        decoder_device = next(self.decoder.parameters()).device
+        if curr_h.device != decoder_device:
+            curr_h = curr_h.to(decoder_device)
+        curr_pos = torch.arange(0, curr_h.size(1), device=decoder_device).unsqueeze(0).repeat(curr_h.size(0), 1)
         
         # Decoder caches must be reset every frame.
         self.decoder.reset_caches()
         
         for i in range(1, self.args.audio_num_codebooks):
             curr_decoder_mask = _index_causal_mask(self.decoder_causal_mask, curr_pos)
-            decoder_h = self.decoder(self.projection(curr_h), input_pos=curr_pos, mask=curr_decoder_mask).to(
-                dtype=dtype
-            )
+            # Projection and decoder are expected on decoder device
+            if self.projection.weight.device != curr_h.device:
+                curr_h = curr_h.to(self.projection.weight.device)
+                curr_pos = curr_pos.to(self.projection.weight.device)
+                curr_decoder_mask = curr_decoder_mask.to(self.projection.weight.device)
+            decoder_h = self.decoder(self.projection(curr_h), input_pos=curr_pos, mask=curr_decoder_mask).to(dtype=dtype)
             ci_logits = torch.mm(decoder_h[:, -1, :], self.audio_head[i - 1])
             ci_sample = sample_topk(ci_logits, topk, temperature)
+            # Embed subsequent codebooks (handle cross-device for embeddings)
             ci_embed = self._embed_audio(i, ci_sample)
             
             curr_h = ci_embed
@@ -267,13 +298,21 @@ class Model(nn.Module):
     
     def _embed_audio(self, codebook: int, tokens: torch.Tensor) -> torch.Tensor:
         """Embed audio tokens."""
+        # Ensure tokens are on the same device as the embedding table
+        embed_device = self.audio_embeddings.weight.device
+        if tokens.device != embed_device:
+            tokens = tokens.to(embed_device)
         return self.audio_embeddings(tokens + codebook * self.args.audio_vocab_size)
     
     def _embed_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
         """Embed tokens."""
+        # All embeddings are computed on the device of the text embedding table (backbone side)
+        text_device = self.text_embeddings.weight.device
+        if tokens.device != text_device:
+            tokens = tokens.to(text_device)
         text_embeds = self.text_embeddings(tokens[:, :, -1]).unsqueeze(-2)
         audio_tokens = tokens[:, :, :-1] + (
-            self.args.audio_vocab_size * torch.arange(self.args.audio_num_codebooks, device=tokens.device)
+            self.args.audio_vocab_size * torch.arange(self.args.audio_num_codebooks, device=text_device)
         )
         audio_embeds = self.audio_embeddings(audio_tokens.view(-1)).reshape(
             tokens.size(0), tokens.size(1), self.args.audio_num_codebooks, -1

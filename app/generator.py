@@ -65,7 +65,11 @@ class Generator:
         self._model = model
         self._model.setup_caches(1)
         self._text_tokenizer = load_llama3_tokenizer()
-        device = next(model.parameters()).device
+        # Select a stable runtime device: use the text embedding table's device (backbone side)
+        try:
+            device = self._model.text_embeddings.weight.device
+        except Exception:
+            device = next(model.parameters()).device
         # Load Mimi codec for audio tokenization
         try:
             logger.info("Loading Mimi audio codec...")
@@ -543,62 +547,65 @@ def _manual_device_map(model, state_dict, strategy="balanced"):
     num_backbone_layers = len(backbone_layer_indices)
     num_decoder_layers = len(decoder_layer_indices)
     
-    # Create device map
-    device_map = {}
-    
-    if strategy == "balanced":
-        # Distribute layers evenly across GPUs
-        layers_per_gpu = (num_backbone_layers + num_decoder_layers) // num_gpus
-        remainder = (num_backbone_layers + num_decoder_layers) % num_gpus
-        
-        # Assign backbone layers
-        for i in backbone_layer_indices:
-            gpu_idx = min(i // layers_per_gpu, num_gpus - 1)
-            device_map[f"backbone.layers.{i}"] = f"cuda:{gpu_idx}"
-        
-        # Assign decoder layers
-        for i in decoder_layer_indices:
-            gpu_idx = min((i + num_backbone_layers) // layers_per_gpu, num_gpus - 1)
-            device_map[f"decoder.layers.{i}"] = f"cuda:{gpu_idx}"
-            
-    elif strategy == "sequential":
-        # Fill each GPU sequentially
-        # Backbone layers on first GPU(s)
-        backbone_per_gpu = max(1, num_backbone_layers // ((num_gpus + 1) // 2))
-        for i in backbone_layer_indices:
-            gpu_idx = min(i // backbone_per_gpu, (num_gpus + 1) // 2 - 1)
-            device_map[f"backbone.layers.{i}"] = f"cuda:{gpu_idx}"
-        
-        # Decoder layers on remaining GPU(s)
-        decoder_per_gpu = max(1, num_decoder_layers // (num_gpus - (num_gpus + 1) // 2 + 1))
-        for i in decoder_layer_indices:
-            gpu_idx = min(i // decoder_per_gpu + (num_gpus + 1) // 2 - 1, num_gpus - 1)
-            device_map[f"decoder.layers.{i}"] = f"cuda:{gpu_idx}"
-    
-    # Assign embeddings and other components
-    device_map["text_embeddings"] = "cuda:0"
-    device_map["audio_embeddings"] = "cuda:0"
-    device_map["projection"] = "cuda:0"
-    device_map["codebook0_head"] = "cuda:0"
-    device_map["audio_head"] = "cuda:0"
-    
-    # Load state dict with device mapping
+    # Helper to create chunked assignment across devices
+    def assign_layers(indices_sorted, devices):
+        mapping = {}
+        if not indices_sorted:
+            return mapping
+        chunk_size = max(1, (len(indices_sorted) + len(devices) - 1) // len(devices))
+        for chunk_idx, start in enumerate(range(0, len(indices_sorted), chunk_size)):
+            dev = devices[min(chunk_idx, len(devices) - 1)]
+            for idx in indices_sorted[start:start + chunk_size]:
+                mapping[idx] = dev
+        return mapping
+
+    devices = [f"cuda:{i}" for i in range(num_gpus)]
+    # Simplified and stable mapping for naive model-parallel:
+    # - Put ALL backbone (and embeddings) on GPU 0
+    # - Put ALL decoder, projection, and heads on the last GPU
+    # This avoids needing pipeline code inside the model forward.
+    last_gpu = devices[-1]
+    bb_map = {i: devices[0] for i in sorted(backbone_layer_indices)}
+    dec_map = {i: last_gpu for i in sorted(decoder_layer_indices)}
+
+    # Load weights to CPU and then move modules per map
     model.load_state_dict(state_dict)
-    
-    # Move model parts to assigned devices
-    for name, device in device_map.items():
-        if "backbone.layers" in name:
-            layer_idx = int(name.split('.')[-1])
-            if hasattr(model.backbone, 'layers') and layer_idx < len(model.backbone.layers):
-                model.backbone.layers[layer_idx] = model.backbone.layers[layer_idx].to(device)
-        elif "decoder.layers" in name:
-            layer_idx = int(name.split('.')[-1])
-            if hasattr(model.decoder, 'layers') and layer_idx < len(model.decoder.layers):
-                model.decoder.layers[layer_idx] = model.decoder.layers[layer_idx].to(device)
-        elif hasattr(model, name):
-            setattr(model, name, getattr(model, name).to(device))
-    
-    logger.info(f"Model distributed across GPUs with {strategy} strategy")
+
+    # Move backbone layers
+    for layer_idx, dev in bb_map.items():
+        if hasattr(model.backbone, 'layers') and layer_idx < len(model.backbone.layers):
+            model.backbone.layers[layer_idx] = model.backbone.layers[layer_idx].to(dev)
+
+    # Move decoder layers
+    for layer_idx, dev in dec_map.items():
+        if hasattr(model.decoder, 'layers') and layer_idx < len(model.decoder.layers):
+            model.decoder.layers[layer_idx] = model.decoder.layers[layer_idx].to(dev)
+
+    # Embeddings on GPU 0 (backbone side)
+    model.text_embeddings = model.text_embeddings.to(devices[0])
+    model.audio_embeddings = model.audio_embeddings.to(devices[0])
+
+    # Projection and codebook0_head on last decoder device
+    model.projection = model.projection.to(last_gpu)
+    model.codebook0_head = model.codebook0_head.to(last_gpu)
+
+    # audio_head is an nn.Parameter, preserve parameter type while moving
+    moved_audio_head = torch.nn.Parameter(model.audio_head.data.to(last_gpu))
+    model.register_parameter("audio_head", moved_audio_head)
+
+    # Log key device placements
+    try:
+        bb0_dev = model.backbone.layers[0].norm1.weight.device if hasattr(model.backbone, 'layers') else devices[0]
+        dec_last_dev = model.decoder.layers[-1].norm1.weight.device if hasattr(model.decoder, 'layers') else last_gpu
+        logger.info(
+            f"Model distributed across GPUs with {strategy} strategy | "
+            f"embeddings={devices[0]}, backbone_first_layer={bb0_dev}, "
+            f"decoder_last_layer={dec_last_dev}, heads={last_gpu}"
+        )
+    except Exception:
+        logger.info(
+            f"Model distributed across GPUs with {strategy} strategy | embeddings={devices[0]}, heads={last_gpu}"
+        )
     return model
 
 def load_csm_1b(ckpt_path: str = "ckpt.pt", device: str = "cuda", device_map: str = None) -> Generator:
