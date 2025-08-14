@@ -207,6 +207,10 @@ class Model(nn.Module):
                 kv = getattr(attn, 'kv_cache', None)
                 if kv is not None and hasattr(kv, 'to'):
                     kv.to(backbone_device)
+            # Some torchtune modules keep cached buffers in layer.norm/attn; align their devices too
+            for layer in getattr(self.backbone, 'layers', []):
+                if hasattr(layer, 'norm'):
+                    layer.norm = layer.norm.to(backbone_device)
         except Exception:
             pass
         self.decoder.setup_caches(max_batch_size, decoder_dtype, decoder_max_seq_len=self.args.audio_num_codebooks)
@@ -217,6 +221,9 @@ class Model(nn.Module):
                 kv = getattr(attn, 'kv_cache', None)
                 if kv is not None and hasattr(kv, 'to'):
                     kv.to(decoder_device)
+            for layer in getattr(self.decoder, 'layers', []):
+                if hasattr(layer, 'norm'):
+                    layer.norm = layer.norm.to(decoder_device)
         except Exception:
             pass
 

@@ -586,6 +586,8 @@ def _manual_device_map(model, state_dict, strategy="balanced"):
     # Ensure backbone final norm is on backbone device
     if hasattr(model.backbone, 'norm'):
         model.backbone.norm = model.backbone.norm.to(devices[0])
+    # As a safety net, move the entire backbone to GPU 0 to catch any remaining params/buffers
+    model.backbone = model.backbone.to(devices[0])
 
     # Move decoder layers
     for layer_idx, dev in dec_map.items():
@@ -594,6 +596,8 @@ def _manual_device_map(model, state_dict, strategy="balanced"):
     # Ensure decoder final norm is on decoder device
     if hasattr(model.decoder, 'norm'):
         model.decoder.norm = model.decoder.norm.to(last_gpu)
+    # As a safety net, move the entire decoder to the last GPU
+    model.decoder = model.decoder.to(last_gpu)
 
     # Embeddings on GPU 0 (backbone side)
     model.text_embeddings = model.text_embeddings.to(devices[0])
