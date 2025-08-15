@@ -198,9 +198,17 @@ class Model(nn.Module):
         backbone_device = next(self.backbone.parameters()).device
         decoder_device = next(self.decoder.parameters()).device
 
-        # Initialize caches on each submodule's device
-        self.backbone.setup_caches(max_batch_size, dtype)
-        self.decoder.setup_caches(max_batch_size, dtype, decoder_max_seq_len=self.args.audio_num_codebooks)
+        # Initialize caches on each submodule's device.
+        # Some upstream modules (torchtune) accept a device kwarg; try that first
+        # to avoid caches defaulting to CPU.
+        try:
+            self.backbone.setup_caches(max_batch_size, dtype, device=backbone_device)
+        except TypeError:
+            self.backbone.setup_caches(max_batch_size, dtype)
+        try:
+            self.decoder.setup_caches(max_batch_size, dtype, decoder_max_seq_len=self.args.audio_num_codebooks, device=decoder_device)
+        except TypeError:
+            self.decoder.setup_caches(max_batch_size, dtype, decoder_max_seq_len=self.args.audio_num_codebooks)
 
         # Register masks on the appropriate devices
         self.register_buffer("backbone_causal_mask", _create_causal_mask(self.backbone.max_seq_len, backbone_device))
@@ -229,8 +237,19 @@ class Model(nn.Module):
         
         assert self.backbone.caches_are_enabled(), "backbone caches are not enabled"
         
+        # Ensure input_pos is on the backbone device for mask indexing
+        if input_pos.device != next(self.backbone.parameters()).device:
+            input_pos = input_pos.to(next(self.backbone.parameters()).device)
         curr_backbone_mask = _index_causal_mask(self.backbone_causal_mask, input_pos)
+        # Compute token embeddings on the embeddings' device, ensure tokens are there for backbone stage
         embeds = self._embed_tokens(tokens)
+        emb_device = embeds.device
+        backbone_device = next(self.backbone.parameters()).device
+        if emb_device != backbone_device:
+            embeds = embeds.to(backbone_device, non_blocking=True)
+            # Also move input_pos for backbone stage
+            if input_pos.device != backbone_device:
+                input_pos = input_pos.to(backbone_device)
         masked_embeds = embeds * tokens_mask.unsqueeze(-1)
         h = masked_embeds.sum(dim=2)
         
@@ -254,6 +273,9 @@ class Model(nn.Module):
         self.decoder.reset_caches()
         
         for i in range(1, self.args.audio_num_codebooks):
+            # Ensure decoder positions are on decoder device for mask indexing
+            if curr_pos.device != decoder_device:
+                curr_pos = curr_pos.to(decoder_device)
             curr_decoder_mask = _index_causal_mask(self.decoder_causal_mask, curr_pos)
             decoder_h = self.decoder(self.projection(curr_h), input_pos=curr_pos, mask=curr_decoder_mask).to(
                 dtype=dtype
