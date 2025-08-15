@@ -20,10 +20,6 @@ services:
       - TORCH_COMPILE_MODE=${TORCH_COMPILE_MODE:-none}
       - ENABLE_QUANTIZATION=${ENABLE_QUANTIZATION:-false}
       - NVIDIA_VISIBLE_DEVICES=all
-    device_requests:
-      - driver: nvidia
-        count: all
-        capabilities: [gpu]
     deploy:
       resources:
         reservations:
