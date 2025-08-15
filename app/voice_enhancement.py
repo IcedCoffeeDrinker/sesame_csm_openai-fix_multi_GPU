@@ -5,7 +5,6 @@ import torchaudio
 import numpy as np
 import soundfile as sf
 from typing import Dict, List, Optional, Tuple
-import traceback
 import logging
 from dataclasses import dataclass
 from scipy import signal
@@ -425,8 +424,7 @@ def create_voice_segments(app_state, regenerate: bool = False):
             try:
                 # Use a lower temperature for more stability in reference samples
                 logger.info(f"Generating reference {i+1}/{len(prompts)} for {voice_name}: '{prompt}'")
-                # Device debug logging removed for production
-
+                
                 # We want references to be as clean as possible
                 audio = generator.generate(
                     text=prompt,
@@ -458,7 +456,7 @@ def create_voice_segments(app_state, regenerate: bool = False):
                         continue
             
             except Exception as e:
-                logger.error(f"Error generating reference for {voice_name}: {e}\n{traceback.format_exc()}")
+                logger.error(f"Error generating reference for {voice_name}: {e}")
         
         # Update the voice profile with references
         if reference_segments:
