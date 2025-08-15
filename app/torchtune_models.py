@@ -297,6 +297,10 @@ class Model(nn.Module):
 
         # Safety: ensure torchtune KV caches are on backbone device (some impls may re-create on CPU)
         _move_kv_caches_to_device(self.backbone, backbone_device)
+
+        # Ensure masks/tensors used in backbone math are co-located
+        if tokens_mask.device != embeds.device:
+            tokens_mask = tokens_mask.to(embeds.device)
         masked_embeds = embeds * tokens_mask.unsqueeze(-1)
         h = masked_embeds.sum(dim=2)
         
