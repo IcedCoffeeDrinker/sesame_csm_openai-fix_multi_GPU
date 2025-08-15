@@ -138,6 +138,45 @@ def _index_causal_mask(mask: torch.Tensor, input_pos: torch.Tensor):
     return r
 
 
+def _move_kv_caches_to_device(module: nn.Module, device: torch.device):
+    """Recursively move torchtune-style KV cache buffers to a target device.
+
+    Handles several possible structures:
+    - module.kv_cache having tensors k_cache, v_cache, cache_pos
+    - module.kv_cache as a tuple/list of tensors
+    - module.kv_cache exposing a .to(device) method
+    """
+    for sub in module.modules():
+        if hasattr(sub, "kv_cache") and sub.kv_cache is not None:
+            kv = sub.kv_cache
+            try:
+                # Preferred: call .to(device) if available
+                if hasattr(kv, "to"):
+                    kv.to(device)
+                    continue
+            except Exception:
+                pass
+            # Fallbacks: move known attributes
+            try:
+                if hasattr(kv, "k_cache") and isinstance(kv.k_cache, torch.Tensor):
+                    kv.k_cache = kv.k_cache.to(device)
+                if hasattr(kv, "v_cache") and isinstance(kv.v_cache, torch.Tensor):
+                    kv.v_cache = kv.v_cache.to(device)
+                if hasattr(kv, "cache_pos") and isinstance(kv.cache_pos, torch.Tensor):
+                    kv.cache_pos = kv.cache_pos.to(device)
+            except Exception:
+                pass
+            # Tuple/list structure
+            try:
+                if isinstance(kv, (tuple, list)):
+                    moved = []
+                    for t in kv:
+                        moved.append(t.to(device) if isinstance(t, torch.Tensor) else t)
+                    sub.kv_cache = type(kv)(moved) if not isinstance(kv, tuple) else tuple(moved)
+            except Exception:
+                pass
+
+
 def _multinomial_sample_one_no_sync(probs):
     """Do multinomial sampling without a cuda synchronization."""
     q = torch.empty_like(probs).exponential_(1)
@@ -210,6 +249,10 @@ class Model(nn.Module):
         except TypeError:
             self.decoder.setup_caches(max_batch_size, dtype, decoder_max_seq_len=self.args.audio_num_codebooks)
 
+        # Force any torchtune kv_cache buffers onto the correct devices
+        _move_kv_caches_to_device(self.backbone, backbone_device)
+        _move_kv_caches_to_device(self.decoder, decoder_device)
+
         # Register masks on the appropriate devices
         self.register_buffer("backbone_causal_mask", _create_causal_mask(self.backbone.max_seq_len, backbone_device))
         self.register_buffer("decoder_causal_mask", _create_causal_mask(self.args.audio_num_codebooks, decoder_device))
@@ -237,9 +280,10 @@ class Model(nn.Module):
         
         assert self.backbone.caches_are_enabled(), "backbone caches are not enabled"
         
-        # Ensure input_pos is on the backbone device for mask indexing
-        if input_pos.device != next(self.backbone.parameters()).device:
-            input_pos = input_pos.to(next(self.backbone.parameters()).device)
+        # Ensure input_pos is on the backbone device for mask indexing and KV update
+        backbone_device = next(self.backbone.parameters()).device
+        if input_pos.device != backbone_device:
+            input_pos = input_pos.to(backbone_device)
         curr_backbone_mask = _index_causal_mask(self.backbone_causal_mask, input_pos)
         # Compute token embeddings on the embeddings' device, ensure tokens are there for backbone stage
         embeds = self._embed_tokens(tokens)
@@ -250,6 +294,9 @@ class Model(nn.Module):
             # Also move input_pos for backbone stage
             if input_pos.device != backbone_device:
                 input_pos = input_pos.to(backbone_device)
+
+        # Safety: ensure torchtune KV caches are on backbone device (some impls may re-create on CPU)
+        _move_kv_caches_to_device(self.backbone, backbone_device)
         masked_embeds = embeds * tokens_mask.unsqueeze(-1)
         h = masked_embeds.sum(dim=2)
         
@@ -277,6 +324,8 @@ class Model(nn.Module):
             if curr_pos.device != decoder_device:
                 curr_pos = curr_pos.to(decoder_device)
             curr_decoder_mask = _index_causal_mask(self.decoder_causal_mask, curr_pos)
+            # Safety: ensure decoder kv caches are on decoder device
+            _move_kv_caches_to_device(self.decoder, decoder_device)
             decoder_h = self.decoder(self.projection(curr_h), input_pos=curr_pos, mask=curr_decoder_mask).to(
                 dtype=dtype
             )
